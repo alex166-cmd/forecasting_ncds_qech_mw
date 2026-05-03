@@ -1,0 +1,247 @@
+---
+title: "Forecasting NCDs cases"
+author: "Alex Maseko"
+date: "2024-02-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the Required Packages
+
+library(forecast)
+
+library(tseries)
+
+library(ggplot2)
+
+library(dplyr)
+
+library(urca)
+
+library(tidyverse)
+
+library(readxl)
+
+library(readr)
+
+library(pastecs)
+
+library(stlARIMA)
+
+library(astsa)
+
+library(lubridate)
+
+library(lmtest)
+
+library(seastests)
+
+library(nortest)
+
+library(pastecs)
+```
+
+
+```{r}
+#Load the Data
+NCDcases<-read_excel("/cloud/project/NCDcases.xlsx")
+#View the Data
+View(NCDcases)
+```
+
+```{r}
+# Produce Descriptive Statistics
+
+summary(NCDcases$NCD)
+
+stat.desc(NCDcases$NCD,basic = TRUE,norm = TRUE,p=0.95)
+
+# Convert the data frame to a time series object
+
+start_year <- 2010
+
+end_year <- 2022
+
+# Create a time sequence from January 2010 to December 2022
+
+dates <- seq(as.Date(paste0(start_year, "-01-01")), by = "months", length.out = 12 * (end_year - start_year + 1))
+
+#Create a time series object
+
+NCOD_cases<- ts(NCDcases$NCD, start = c(start_year, 1), frequency = 12)
+
+# Plot the time series Data of NCDcases
+
+plot.ts(NCOD_cases,main="",xlab="Year",ylab="NCDs cases")
+
+# Plot the Diistribution Graphs of NCDs cases data
+
+mu <- mean(NCOD_cases) # mean of the data
+
+sigma <- sd(NCOD_cases) # standard deviation of the data
+
+x<-seq(min(NCOD_cases),max(NCOD_cases),length = 100)
+
+y <- dnorm(x, mean = mu, sd = sigma) # compute normal PDF values
+
+par(mfrow=c(1,2),oma=c(0,0,0,0))
+
+boxplot(NCOD_cases,main="")
+
+hist(NCOD_cases,main = "",freq = FALSE)
+
+lines(x,y,col = "blue",lwd = 2)
+
+# Decompose and plot the time series decomposed data
+
+NCDdecom <- decompose(NCOD_cases)
+
+print(NCDdecom)
+
+autoplot(NCDdecom)
+
+# Plot the trend of NCD cases
+
+ggplot(NCDcases, aes(x = Date, y = NCD)) +
+
+
+geom_line() +
+
+labs(title = "",
+
+x = "Year",
+
+y = "NCDs cases") + theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.background = element_blank(),panel.border = element_rect(color = "black",fill = NA))+geom_smooth(method = "lm",se=FALSE)
+
+# Perform a trend analysis
+
+time<-seq(1,12*13,by=1)
+
+trend<-data.frame(time,NCDs=c(NCOD_cases))
+
+linear_model<-lm(NCDs~time,data = trend)
+
+summary(linear_model)
+
+# Plot the Seasonal Component
+
+plot(NCDdecom$seasonal,xlab="month/year",ylab="Seasonal Component")
+
+# Plot the Periodogram
+
+per <- spectrum(NCOD_cases)
+
+plot(per, main = "")
+
+# Perofrm a Seasonaloty test using Friedman Rank test and Boolean Logic
+
+fried(NCOD_cases,freq = 12,diff = TRUE,residuals = FALSE,autoarima = TRUE)
+
+isSeasonal(NCOD_cases,test = "combined",freq = 12)
+
+# Plot the time series data and ACF & PACF to inspect for Stationarity
+
+NCOD_cases%>%forecast::ggtsdisplay(main="")
+
+# perform an ADF test
+
+adf.test(NCOD_cases)
+
+# Seasonal Difference the data and Plot the seasonally differenced and perform an ADF test
+
+seasonal_period<-12
+
+NCD.cases<-diff(NCOD_cases,lag = seasonal_period)
+
+NCD.cases%>%forecast::ggtsdisplay(main="")
+
+adf.test(NCD.cases)
+
+# Choose parameters of Seasonal Arima model and choose the best model to be used
+
+model<-Arima(NCOD_cases,order = c(0,0,1),seasonal = c(0,1,2),include.drift = TRUE)
+
+coeftest(model)
+
+accuracy(model)
+
+summary(model)
+
+model4<-Arima(NCOD_cases,order = c(0,0,1),seasonal = c(0,1,2),include.constant = FALSE)
+
+coeftest(model4)
+
+accuracy(model4)
+
+summary(model4)
+
+model5<-Arima(NCOD_cases,order = c(1,0,1),seasonal = c(0,1,1),include.drift = TRUE)
+
+coeftest(model5)
+
+accuracy(model5)
+
+summary(model5)
+
+# Create forecasts from the models, Check the residuals and produce forecasts from the models
+
+checkresiduals(model$residuals)
+
+checkresiduals(model4$residuals)
+
+checkresiduals(model5$residuals)
+
+forecasted1<-forecast(model,h=48)
+
+print(forecasted1)
+
+autoplot(forecasted1)
+
+forecasted4<-forecast(model4)
+
+print(forecasted4)
+
+autoplot(forecasted4)
+
+forecasted5<-forecast(model5)
+
+print(forecasted5)
+
+autoplot(forecasted5)
+
+# Plot the models residual ACF & PACF fro SARIMA (0,0,1)(0,1,2)[12] with drift
+
+par(mfrow=c(1,2),oma=c(0,0,0,0))
+
+Acf(model$residuals,lag.max = 36,main="")
+
+Pacf(model$residuals,lag.max = 36,main="")
+
+# Plot the Graphs for model chaecking
+
+par(mfrow=c(2,2),oma=c(0,0,0,0))
+
+qqnorm(model$residuals,datax = TRUE,pch=16)
+
+qqline(model$residuals,datax = TRUE)
+
+plot(model$fitted,model$residuals,pch=16, xlab='Fitted Value',
+
+ylab='Residual',main="Residuals vs Fitted")
+
+abline(h=0)
+
+hist(model$residuals,col="gray",xlab='Residual',main='Histogram of Residuals')
+plot(model$residuals,type="l",xlab='Observation Order',
+
+ylab='Residual')
+
+points(model$residuals,pch=16,cex=.5,main="Residual Plot")
+
+abline(h=0)
+
+```
