@@ -1,0 +1,414 @@
+---
+title: "Forecasting Non-Communicable Diseases (NCDs) at QECH, Malawi"
+author: "Alex Maseko"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+## 1. Introduction
+
+Non-communicable diseases (NCDs) — including hypertension, diabetes, cardiovascular disease, and cancer — are a growing burden on health systems across sub-Saharan Africa. Queen Elizabeth Central Hospital (QECH) in Blantyre, Malawi is the country's largest referral hospital and receives a high and rising volume of NCD-related admissions.
+
+This project uses historical monthly NCD case data from QECH (2010–2022) to build a Seasonal ARIMA (SARIMA) forecasting model that projects future case loads. The findings are intended to support evidence-based resource allocation and capacity planning decisions.
+
+**Research question:** Can historical NCD admission data at QECH be used to accurately forecast future case loads over a 48-month horizon?
+
+---
+
+## 2. Load Required Packages
+
+```{r packages}
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+library(urca)
+library(tidyverse)
+library(readxl)
+library(readr)
+library(pastecs)
+library(astsa)
+library(lubridate)
+library(lmtest)
+library(seastests)
+library(nortest)
+```
+
+---
+
+## 3. Load and Inspect the Data
+
+```{r load-data}
+NCDcases <- read_excel("NCDcases.xlsx")
+head(NCDcases)
+```
+
+```{r descriptive-stats}
+summary(NCDcases$NCD)
+stat.desc(NCDcases$NCD, basic = TRUE, norm = TRUE, p = 0.95)
+```
+
+**Interpretation:** The summary statistics give us the central tendency, spread, and normality indicators of the monthly NCD case counts. Key values to note are the mean, standard deviation, and skewness — these inform whether the data requires transformation before modelling.
+
+---
+
+## 4. Create the Time Series Object
+
+```{r create-ts}
+start_year <- 2010
+end_year   <- 2022
+
+NCOD_cases <- ts(NCDcases$NCD, start = c(start_year, 1), frequency = 12)
+```
+
+The data is structured as a monthly time series from **January 2010 to December 2022** — 156 observations in total, with a seasonal frequency of 12 (months).
+
+---
+
+## 5. Exploratory Data Analysis
+
+### 5.1 Time Series Plot
+
+```{r ts-plot}
+plot.ts(NCOD_cases,
+        main = "Monthly NCD Cases at QECH (2010–2022)",
+        xlab = "Year",
+        ylab = "NCD Cases",
+        col  = "steelblue",
+        lwd  = 1.5)
+```
+
+**Interpretation:** The time series plot reveals the overall trajectory of NCD admissions over the study period. An upward trend indicates that NCD cases have been increasing over time, which is consistent with the epidemiological transition observed across sub-Saharan Africa.
+
+### 5.2 Distribution of NCD Cases
+
+```{r distribution}
+mu    <- mean(NCOD_cases)
+sigma <- sd(NCOD_cases)
+x     <- seq(min(NCOD_cases), max(NCOD_cases), length = 100)
+y     <- dnorm(x, mean = mu, sd = sigma)
+
+par(mfrow = c(1, 2), oma = c(0, 0, 0, 0))
+boxplot(NCOD_cases, main = "Boxplot of NCD Cases", ylab = "Cases")
+hist(NCOD_cases, main = "Histogram of NCD Cases", freq = FALSE,
+     xlab = "Cases", col = "lightblue")
+lines(x, y, col = "blue", lwd = 2)
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:** The boxplot shows the interquartile range and identifies any outliers in monthly case counts. The histogram overlaid with a normal distribution curve indicates whether the data is approximately normally distributed. Skewness or heavy tails suggest the data may need differencing or transformation.
+
+### 5.3 Trend Analysis
+
+```{r trend}
+ggplot(NCDcases, aes(x = Date, y = NCD)) +
+  geom_line(colour = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, colour = "red", linetype = "dashed") +
+  labs(x = "Year", y = "NCD Cases",
+       title = "NCD Cases Trend at QECH (2010–2022)") +
+  theme(panel.grid.major  = element_blank(),
+        panel.grid.minor  = element_blank(),
+        panel.background  = element_blank(),
+        panel.border      = element_rect(color = "black", fill = NA))
+```
+
+```{r linear-trend}
+time         <- seq(1, 12 * 13, by = 1)
+trend        <- data.frame(time, NCDs = c(NCOD_cases))
+linear_model <- lm(NCDs ~ time, data = trend)
+summary(linear_model)
+```
+
+**Interpretation:** The linear model fitted to the time index quantifies the average monthly increase in NCD cases. A statistically significant positive coefficient on `time` (p < 0.05) confirms a genuine upward trend rather than random variation. The R² value indicates how much of the variability in case counts is explained by this linear trend alone.
+
+---
+
+## 6. Time Series Decomposition
+
+```{r decomposition}
+NCDdecom <- decompose(NCOD_cases)
+autoplot(NCDdecom) +
+  labs(title = "Classical Decomposition of NCD Cases")
+```
+
+**Interpretation:** Classical decomposition separates the time series into three components:
+
+- **Trend:** The long-run direction of NCD cases — confirms the upward movement observed in the raw plot.
+- **Seasonal:** Recurring monthly patterns within each year — peaks in certain months may reflect seasonal health-seeking behaviour or disease triggers.
+- **Remainder (Random):** Unexplained variation after removing trend and seasonality — ideally this should appear as white noise with no visible pattern.
+
+### 6.1 Seasonal Component
+
+```{r seasonal-plot}
+plot(NCDdecom$seasonal,
+     xlab = "Month / Year",
+     ylab = "Seasonal Component",
+     main = "Seasonal Component of NCD Cases",
+     col  = "darkgreen")
+```
+
+**Interpretation:** The seasonal component plot shows the within-year pattern repeated annually. Months with consistently higher seasonal values indicate periods of elevated NCD admissions — important for scheduling clinical staff and procuring medicines.
+
+### 6.2 Periodogram
+
+```{r periodogram}
+per <- spectrum(NCOD_cases)
+```
+
+**Interpretation:** The periodogram identifies dominant cycles in the data by frequency. A prominent spike at frequency 1/12 (corresponding to a 12-month cycle) confirms the presence of annual seasonality, validating the use of a seasonal model.
+
+---
+
+## 7. Seasonality Testing
+
+```{r seasonality-test}
+isSeasonal(NCOD_cases, test = "combined", freq = 12)
+```
+
+**Interpretation:** The combined seasonality test (Friedman + QS test) formally tests whether statistically significant seasonality is present at the 12-month frequency. A result of `TRUE` confirms that seasonal patterns must be accounted for in the forecasting model — ruling out a non-seasonal ARIMA.
+
+---
+
+## 8. Stationarity Testing
+
+### 8.1 ACF and PACF of Raw Series
+
+```{r acf-raw}
+NCOD_cases %>% forecast::ggtsdisplay(main = "Raw NCD Cases — ACF & PACF")
+```
+
+**Interpretation:** The ACF of the raw series shows slow decay, indicating non-stationarity. The PACF cuts off after lag 1, suggesting an autoregressive component. Significant spikes at seasonal lags (12, 24, 36) confirm seasonal structure.
+
+### 8.2 Augmented Dickey-Fuller Test (Raw Series)
+
+```{r adf-raw}
+adf.test(NCOD_cases)
+```
+
+**Interpretation:** The ADF test formally tests the null hypothesis of a unit root (non-stationarity). A p-value above 0.05 fails to reject the null — meaning the raw series is non-stationary and requires differencing before fitting an ARIMA model.
+
+### 8.3 Seasonal Differencing
+
+```{r seasonal-diff}
+seasonal_period <- 12
+NCD.cases       <- diff(NCOD_cases, lag = seasonal_period)
+
+NCD.cases %>% forecast::ggtsdisplay(main = "Seasonally Differenced NCD Cases — ACF & PACF")
+```
+
+```{r adf-diff}
+adf.test(NCD.cases)
+```
+
+**Interpretation:** After applying one seasonal difference (lag = 12), the ACF and PACF plots should show significantly reduced autocorrelation at seasonal lags. The ADF test p-value should now fall below 0.05, rejecting the unit root and confirming the differenced series is stationary — ready for ARIMA model fitting.
+
+---
+
+## 9. SARIMA Model Fitting
+
+Three candidate SARIMA models are fitted and compared using AIC, BIC, and forecast accuracy metrics.
+
+### 9.1 Model 1 — SARIMA(0,0,1)(0,1,2)[12] with Drift
+
+```{r model1}
+model <- Arima(NCOD_cases,
+               order    = c(0, 0, 1),
+               seasonal = c(0, 1, 2),
+               include.drift = TRUE)
+coeftest(model)
+accuracy(model)
+summary(model)
+```
+
+### 9.2 Model 2 — SARIMA(0,0,1)(0,1,2)[12] without Constant
+
+```{r model2}
+model4 <- Arima(NCOD_cases,
+                order    = c(0, 0, 1),
+                seasonal = c(0, 1, 2),
+                include.constant = FALSE)
+coeftest(model4)
+accuracy(model4)
+summary(model4)
+```
+
+### 9.3 Model 3 — SARIMA(1,0,1)(0,1,1)[12] with Drift
+
+```{r model3}
+model5 <- Arima(NCOD_cases,
+                order    = c(1, 0, 1),
+                seasonal = c(0, 1, 1),
+                include.drift = TRUE)
+coeftest(model5)
+accuracy(model5)
+summary(model5)
+```
+
+**Interpretation — Model Comparison:** Models are compared on AIC (Akaike Information Criterion), BIC (Bayesian Information Criterion), and RMSE/MAPE from the `accuracy()` output. Lower AIC/BIC indicates a better-fitting model with appropriate complexity. The model with the best balance of low information criteria and low forecast error is selected for final forecasting.
+
+---
+
+## 10. Residual Diagnostics
+
+Well-specified ARIMA models should produce residuals that behave like white noise — no remaining autocorrelation, approximately normally distributed, and with constant variance.
+
+```{r residuals-model1}
+checkresiduals(model$residuals)
+```
+
+```{r residuals-model2}
+checkresiduals(model4$residuals)
+```
+
+```{r residuals-model3}
+checkresiduals(model5$residuals)
+```
+
+### 10.1 ACF & PACF of Residuals (Best Model)
+
+```{r residual-acf}
+par(mfrow = c(1, 2), oma = c(0, 0, 0, 0))
+Acf(model$residuals,  lag.max = 36, main = "ACF of Residuals")
+Pacf(model$residuals, lag.max = 36, main = "PACF of Residuals")
+par(mfrow = c(1, 1))
+```
+
+### 10.2 Full Residual Diagnostic Plots
+
+```{r residual-plots}
+par(mfrow = c(2, 2), oma = c(0, 0, 0, 0))
+
+qqnorm(model$residuals, datax = TRUE, pch = 16, main = "Normal Q-Q Plot")
+qqline(model$residuals, datax = TRUE)
+
+plot(model$fitted, model$residuals, pch = 16,
+     xlab = "Fitted Value", ylab = "Residual",
+     main = "Residuals vs Fitted")
+abline(h = 0, col = "red")
+
+hist(model$residuals, col = "lightgray",
+     xlab = "Residual", main = "Histogram of Residuals")
+
+plot(model$residuals, type = "l",
+     xlab = "Observation Order", ylab = "Residual",
+     main = "Residuals over Time")
+points(model$residuals, pch = 16, cex = 0.5)
+abline(h = 0, col = "red")
+
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+- **Q-Q plot:** Points should follow the diagonal line closely, indicating normally distributed residuals. Systematic deviation suggests non-normality.
+- **Residuals vs Fitted:** Should show no pattern — a random scatter around zero confirms constant variance (homoscedasticity).
+- **Histogram of residuals:** Should approximate a bell curve centred at zero.
+- **Residuals over time:** Should show no trend, seasonality, or clustering — confirming white noise behaviour.
+
+---
+
+## 11. Actual vs Fitted Values
+
+```{r actual-vs-fitted}
+fitted_values <- fitted(model)
+
+ggplot() +
+  geom_line(aes(x = time(NCOD_cases), y = as.numeric(NCOD_cases),
+                colour = "Actual"), linewidth = 1) +
+  geom_line(aes(x = time(fitted_values), y = as.numeric(fitted_values),
+                colour = "Fitted"), linewidth = 1, linetype = "dashed") +
+  scale_colour_manual(values = c("Actual" = "steelblue", "Fitted" = "red")) +
+  labs(title = "Actual vs Fitted — NCD Cases at QECH",
+       x = "Year", y = "NCD Cases", colour = "") +
+  theme_minimal()
+```
+
+**Interpretation:** Close alignment between the actual (blue) and fitted (red dashed) lines indicates good in-sample model performance. Large deviations in certain periods may reflect structural breaks, data anomalies, or model limitations.
+
+---
+
+## 12. Forecasting
+
+### 12.1 48-Month Forecast — Model 1
+
+```{r forecast-model1}
+forecasted1 <- forecast(model, h = 48)
+print(forecasted1)
+autoplot(forecasted1) +
+  labs(title = "48-Month NCD Forecast — SARIMA(0,0,1)(0,1,2)[12] with Drift",
+       x = "Year", y = "NCD Cases")
+```
+
+### 12.2 Forecast — Model 2
+
+```{r forecast-model2}
+forecasted4 <- forecast(model4)
+autoplot(forecasted4) +
+  labs(title = "NCD Forecast — SARIMA(0,0,1)(0,1,2)[12]",
+       x = "Year", y = "NCD Cases")
+```
+
+### 12.3 Forecast — Model 3
+
+```{r forecast-model3}
+forecasted5 <- forecast(model5)
+autoplot(forecasted5) +
+  labs(title = "NCD Forecast — SARIMA(1,0,1)(0,1,1)[12] with Drift",
+       x = "Year", y = "NCD Cases")
+```
+
+**Interpretation:** The forecast plots show the projected NCD case trajectory (point forecast) alongside 80% and 95% confidence intervals (shaded bands). Wider bands at the far end of the forecast horizon reflect increasing uncertainty over time — which is expected and appropriate. The upward trajectory of the central forecast confirms that NCD admissions at QECH are projected to continue rising over the next four years.
+
+---
+
+## 13. Summary of Findings
+
+| Metric | Value |
+|---|---|
+| Study period | January 2010 – December 2022 |
+| Total observations | 156 months |
+| Trend direction | Upward (statistically significant) |
+| Seasonality confirmed | Yes (combined test, p < 0.05) |
+| Best model | SARIMA(0,0,1)(0,1,2)[12] with drift |
+| Forecast horizon | 48 months (2023–2026) |
+| Residual behaviour | Approximately white noise |
+
+**Key conclusions:**
+
+1. NCD admissions at QECH show a statistically significant **upward trend** over the 2010–2022 period.
+2. A clear **annual seasonal pattern** exists — certain months consistently record higher admissions.
+3. The SARIMA model produces **reliable forecasts** with residuals satisfying white noise conditions.
+4. Projected case loads over 2023–2026 indicate that QECH should plan for **continued growth in NCD demand**, with implications for staffing, bed capacity, and pharmaceutical procurement.
+
+---
+
+## 14. Limitations
+
+- Analysis is based on aggregate NCD counts; disease-specific forecasts (hypertension, diabetes, etc.) would provide more targeted planning insights.
+- The model assumes structural stability — significant health system changes or external shocks (e.g., pandemics) could affect forecast accuracy.
+- Data quality is dependent on the completeness of hospital records during the study period.
+
+---
+
+*Undergraduate thesis — BSc Applied Statistics, The Catholic University of Malawi (2024)*  
+*Supervised by Mr. Harold Chimutu Banda, Head of Mathematical Sciences*  
+*Author: Alex Maseko | [GitHub](https://github.com/alex166-cmd) | [LinkedIn](https://www.linkedin.com/in/alexmaseko)*
